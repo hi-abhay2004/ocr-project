@@ -1,0 +1,22 @@
+--- /home/raghu/Desktop/projects/Evaluation_system(RAG)/ai/rag/chunker.py
++++ /home/raghu/Desktop/projects/Evaluation_system(RAG)/ai/rag/chunker.py
+@@ -17,6 +17,21 @@
+ 
+ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+ _CLAUSE_SPLIT_RE = re.compile(r"(,\s+)")
++
++LONG_SENTENCE_CHARS = 90
++MIN_CLAUSE_CHARS = 15
++
++@dataclass
++class Chunk:
++    text: str
++    start: int
++    end: int
++    underlined: bool = False
++
++def _overlaps_any(start: int, end: int, spans: tuple) -> bool:
++    return any(start < e and s < end for s, e in spans)
+ 
+ def _split_sentence(sentence: str) -> list[str]:
+     if len(sentence) <= LONG_SENTENCE_CHARS:

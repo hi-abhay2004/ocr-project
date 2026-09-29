@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Bash(npm create *)",
+      "Bash(npm install *)",
+      "Bash(node -p \"const p=require\\('./package.json'\\); JSON.stringify\\({...p.dependencies,...p.devDependencies},null,1\\)\")",
+      "Bash(npm audit *)",
+      "Bash(node -p \"'react-router-dom '+require\\('react-router-dom/package.json'\\).version\")",
+      "Bash(npx --yes shadcn@latest add button input label select table dialog card badge progress tabs sonner dropdown-menu skeleton alert checkbox textarea separator tooltip form --yes --overwrite)",
+      "Bash(node -p \"Object.keys\\(require\\('./package.json'\\).dependencies\\).join\\('\\\\n'\\)\")",
+      "Bash(rm -f src/App.css src/assets/react.svg)",
+      "Bash(rmdir src/assets)",
+      "Bash(rm -f src/App.tsx)",
+      "Bash(npx --yes msw init public/ --save)",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(npx vitest *)",
+      "Bash(npx playwright *)"
+    ]
+  }
+}

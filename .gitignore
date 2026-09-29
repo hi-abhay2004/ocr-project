@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+
+# Django
+*.log
+media/
+staticfiles/
+db.sqlite3
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Datasets (downloaded, not committed)
+datasets/
+
+# Node (frontend has its own, this covers root-level tooling if any)
+node_modules/
+
+# Editors / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+
+# Docker
+pgdata/
