@@ -20,6 +20,7 @@ import time
 from celery import shared_task
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 
 from ai.config import CONFIDENCE_BAND_GREEN, CONFIDENCE_BAND_ORANGE
 from ai.providers import get_embedding_provider, get_llm_provider, get_vlm_provider
@@ -28,6 +29,14 @@ from .models import AnswerSheet
 from .pipeline_runner import create_real_evaluations
 
 STAGE_ORDER = [s for s in AnswerSheet.Stage.values if s != AnswerSheet.Stage.QUEUED]
+
+
+class _Cancelled(Exception):
+    """Raised when _run() notices, between stages, that a teacher cancelled
+    this sheet out from under it (SheetCancelView already set status to
+    FAILED with its own message) — a real-provider evaluation can run for
+    minutes, and without this check a cancel just updates a row a worker is
+    about to overwrite the instant it finishes, with no actual effect."""
 
 
 def _sheet_band_for(confidence: float) -> str:
@@ -42,12 +51,24 @@ def _sheet_band_for(confidence: float) -> str:
 def evaluate_sheet(sheet_id: int):
     try:
         _run(sheet_id)
+    except _Cancelled:
+        # SheetCancelView already set status=FAILED with its own message —
+        # nothing here to add, and overwriting it would stamp a generic
+        # "Evaluation failed" message over the teacher's own cancellation.
+        raise
     except Exception as exc:  # noqa: BLE001 — this boundary must never re-raise
         msg = f"Evaluation failed: {exc}"
-        exc_type = str(type(exc)).lower()
-        if "openai" in exc_type and any(x in exc_type for x in ["servererror", "ratelimit", "timeout", "connection"]):
-            msg = "Currently NVIDIA servers are experiencing huge load, try after some time."
-            
+        # Provider-agnostic: matched on the *message*, not the exception's
+        # module/class name, so it fires the same way whether the active
+        # LLM_PROVIDER is nim (openai.* exceptions), gemini
+        # (google.genai.errors.APIError) or anything else — a hardcoded
+        # "openai" in the exception's type name only ever matched nim, and
+        # only ever produced an NVIDIA-branded message regardless of which
+        # provider was actually configured.
+        exc_text = str(exc).lower()
+        if any(x in exc_text for x in ["rate limit", "ratelimit", "429", "503", "overloaded", "timeout", "connection"]):
+            msg = "The AI provider is currently overloaded or rate-limited — try again in a few minutes."
+
         AnswerSheet.objects.filter(id=sheet_id).update(
             status=AnswerSheet.Status.FAILED,
             error_message=msg,
@@ -59,7 +80,8 @@ def _run(sheet_id: int):
     sheet = AnswerSheet.objects.select_related("exam").get(id=sheet_id)
     sheet.status = AnswerSheet.Status.RUNNING
     sheet.stage = AnswerSheet.Stage.QUEUED
-    sheet.save(update_fields=["status", "stage"])
+    sheet.last_run_started_at = timezone.now()
+    sheet.save(update_fields=["status", "stage", "last_run_started_at"])
 
     embedder = get_embedding_provider()
     llm = get_llm_provider()
@@ -78,6 +100,13 @@ def _run(sheet_id: int):
         # here would make every upload-touching test take 4+ seconds for no
         # functional reason.
         time.sleep(settings.PIPELINE_STAGE_DELAY_SECONDS)
+        # A real-provider evaluation can run for minutes (CELERY_TASK_TIME_LIMIT
+        # allows up to 11) — checked once per stage, not just at the start,
+        # so a teacher's cancel actually takes effect partway through
+        # rather than being silently overwritten the moment this finishes.
+        current_status = AnswerSheet.objects.filter(id=sheet_id).values_list("status", flat=True).first()
+        if current_status != AnswerSheet.Status.RUNNING:
+            raise _Cancelled(f"sheet {sheet_id} is no longer RUNNING (now {current_status})")
         sheet.stage = stage
         sheet.save(update_fields=["stage"])
 

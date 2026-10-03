@@ -34,8 +34,25 @@ def build_prompt(question_text: str, model_answer: str) -> str:
         f"Extract the independently gradable concepts from the model "
         f"answer below (at most {CONCEPT_COUNT_MAX}). Each concept is one "
         "fact, definition or step that a student's answer either does or "
-        'does not cover. Give each a "weight" — its share of the marks — '
-        "so all weights sum to 1.0.\n\n"
+        "does not cover — a concept must be checkable on its own, "
+        "independent of the others. A single word is NOT independently "
+        "checkable: splitting an acronym expansion, a term, or a short "
+        "phrase into one concept per word produces concepts that can only "
+        "ever be judged together, not separately, which defeats the "
+        "purpose of splitting them at all. If the model answer is one "
+        "short phrase, name, formula or definition with no separate facts "
+        "to tell apart, that is legitimately ONE concept — do not invent "
+        "extra ones to pad the count.\n\n"
+        "Wrong (splits one fact into meaningless word-fragments):\n"
+        '  model answer: "Hyper Text Markup Language"\n'
+        '  {"concepts": [{"text": "Hyper", "weight": 0.25}, '
+        '{"text": "Text", "weight": 0.25}, {"text": "Markup", "weight": 0.25}, '
+        '{"text": "Language", "weight": 0.25}]}\n'
+        "Right (the expansion is one checkable fact):\n"
+        '  {"concepts": [{"text": "HTML stands for Hyper Text Markup Language", '
+        '"weight": 1.0}]}\n\n'
+        'Give each concept a "weight" — its share of the marks — so all '
+        "weights sum to 1.0.\n\n"
         'Reply with EXACTLY this JSON shape: {"concepts": '
         '[{"text": "...", "weight": 0.2}, ...]}\n\n'
         f"<model_answer>\n{model_answer.strip()}\n</model_answer>"

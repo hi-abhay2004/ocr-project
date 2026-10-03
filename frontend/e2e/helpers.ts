@@ -1,22 +1,30 @@
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { expect, type Page } from '@playwright/test'
+
+// import.meta.url, not __dirname — this package is "type": "module", so
+// there is no CommonJS __dirname in scope here.
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 /**
  * Shared setup for specs that need a real, reviewable sheet against the real
- * backend (Phase B3's stub evaluator) — happy-path.spec.ts and
- * overlay-scaling.spec.ts both start from exactly this state.
+ * backend — happy-path.spec.ts and overlay-scaling.spec.ts both start from
+ * exactly this state.
  *
  * Runs against a REAL, PERSISTENT Postgres database, not MSW's per-test
  * in-memory reset — every account/USN is run-unique so repeated runs don't
  * collide with "already exists" 400s from a previous run.
  */
 
-// One 1x1 PNG, reused by every spec that needs to upload "a sheet" — the
-// stub evaluator ignores the actual uploaded bytes and renders its own
-// fixture crop (apps/evaluation/fixtures.py), so the upload only needs to be
-// a valid image, not a realistic scan.
-const PNG_1X1_HEX =
-  '89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de0000000c4944415478' +
-  '9c63f8cfc000000301010018dd8db00000000049454e44ae426082'
+// A real, decodable answer-sheet photo. There used to be a hand-built 1x1
+// PNG here on the theory that a stub evaluator ignored the uploaded bytes
+// anyway — that stub is gone (apps/evaluation/pipeline_runner.py now runs
+// the real L1-L5/VLM-first pipeline against whatever was actually
+// uploaded), and the real worker rejects that 1x1 PNG while decoding it, so
+// the sheet never reaches DONE and "Review this sheet" never appears. See
+// docs/evaluation_workflow.md §5.
+const SAMPLE_ANSWER_SHEET = readFileSync(path.join(__dirname, 'fixtures', 'sample-answer.jpeg'))
 
 export function uniqueId(): string {
   return `${Date.now()}${Math.floor(Math.random() * 1000)}`
@@ -99,9 +107,9 @@ export async function setUpReviewableSheet(page: Page): Promise<{ usn: string; r
   await page.getByLabel('Student').click()
   await page.getByRole('option', { name: new RegExp(usn) }).click()
   await page.setInputFiles('input[type="file"]', {
-    name: 'sheet.png',
-    mimeType: 'image/png',
-    buffer: Buffer.from(PNG_1X1_HEX, 'hex'),
+    name: 'sheet.jpeg',
+    mimeType: 'image/jpeg',
+    buffer: SAMPLE_ANSWER_SHEET,
   })
   await page.getByRole('button', { name: /^Upload/ }).click()
 

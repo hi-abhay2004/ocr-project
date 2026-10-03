@@ -2,7 +2,7 @@ import pytest
 
 from apps.evaluation.models import AnswerSheet
 
-from .conftest import make_uploaded_file
+from .conftest import make_uploaded_file, render_answer_page_png
 
 pytestmark = pytest.mark.django_db
 
@@ -124,19 +124,20 @@ class TestStubEvaluator:
         evaluation = sheet.evaluations.first()
         scores = list(evaluation.concept_scores.all())
 
-        from ai.config import SIMILARITY_FULL_CREDIT, SIMILARITY_PARTIAL_CREDIT
+        from ai.config import SIMILARITY_FULL_CREDIT
 
         assert len(scores) == question.concepts.count()
         for score in scores:
             assert 0.0 <= score.similarity <= 1.0
-            # status must be consistent with the similarity that produced it
-            # (ai.scoring.band_concept: COVERED needs similarity >=
-            # SIMILARITY_FULL_CREDIT; MISSING needs similarity <
-            # SIMILARITY_PARTIAL_CREDIT AND an llm verdict of MISSING).
+            # status must be consistent with the similarity that produced
+            # it (ai.scoring.band_concept: COVERED needs similarity >=
+            # SIMILARITY_FULL_CREDIT). MISSING has no similarity floor or
+            # ceiling to check against — an LLM "missing" verdict stands
+            # regardless of similarity (2026-10-01: no threshold safely
+            # separates a real near-miss from a wrong-booklet upload in
+            # this embedding space).
             if score.status == "COVERED":
                 assert score.similarity >= SIMILARITY_FULL_CREDIT
-            elif score.status == "MISSING":
-                assert score.similarity < SIMILARITY_PARTIAL_CREDIT
 
     def test_auto_marks_equals_the_sum_of_concept_marks(
         self, auth_client, exam, question, enrolled_student
@@ -183,19 +184,22 @@ class TestStubEvaluator:
         # test client as a raised Python exception. This test isolates what
         # it actually needs to check: evaluate_sheet()'s own try/except
         # contract, not DRF's separate exception-handling layer.
+        from django.core.files.base import ContentFile
+
+        from apps.evaluation.models import SheetPage
         from apps.evaluation.tasks import evaluate_sheet
 
         sheet = AnswerSheet.objects.create(exam=exam, student=enrolled_student, page_count=1)
+        # A real uploaded page: an empty answer now short-circuits before
+        # ever calling the LLM (ai.pipeline.evaluate_question's own
+        # "nothing to grade" fast path), so simulating a provider outage
+        # needs a question that actually reaches the coverage-check call.
+        page = SheetPage(sheet=sheet, index=0)
+        page.image.save("page1.png", ContentFile(render_answer_page_png()), save=True)
 
         def boom(*args, **kwargs):
             raise RuntimeError("simulated provider outage")
 
-        # get_llm_provider, not get_embedding_provider: with no SheetPage
-        # uploaded, segmentation finds no blocks and the embedder is
-        # correctly never called at all (empty text -> no chunks to embed)
-        # — but ai.coverage.check_coverage's triple-pass vote runs
-        # regardless, once per concept, so the LLM provider is always the
-        # one guaranteed to fire.
         monkeypatch.setattr(
             "apps.evaluation.tasks.get_llm_provider", lambda: type("M", (), {"chat": boom})()
         )
@@ -217,9 +221,14 @@ class TestStubEvaluator:
         # LLM call failing during evaluation itself). evaluate_sheet's own
         # try/except is what has to catch this, same contract as any other
         # provider failure.
+        from django.core.files.base import ContentFile
+
+        from apps.evaluation.models import SheetPage
         from apps.evaluation.tasks import evaluate_sheet
 
         sheet = AnswerSheet.objects.create(exam=exam, student=enrolled_student, page_count=1)
+        page = SheetPage(sheet=sheet, index=0)
+        page.image.save("page1.png", ContentFile(render_answer_page_png()), save=True)
 
         class _BrokenLLM:
             def chat(self, prompt, *, system=None, json_mode=True):
@@ -246,9 +255,14 @@ class TestStubEvaluator:
         # forever.
         from celery.exceptions import SoftTimeLimitExceeded
 
+        from django.core.files.base import ContentFile
+
+        from apps.evaluation.models import SheetPage
         from apps.evaluation.tasks import evaluate_sheet
 
         sheet = AnswerSheet.objects.create(exam=exam, student=enrolled_student, page_count=1)
+        page = SheetPage(sheet=sheet, index=0)
+        page.image.save("page1.png", ContentFile(render_answer_page_png()), save=True)
 
         def timed_out(*args, **kwargs):
             raise SoftTimeLimitExceeded()
@@ -278,6 +292,7 @@ class TestSheetStatusAndDetail:
             "status",
             "stage",
             "started_at",
+            "last_run_started_at",
             "error_message",
         }
 

@@ -8,6 +8,7 @@ individual blocks for persistence.
 """
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 
@@ -15,6 +16,8 @@ import cv2
 import numpy as np
 
 from ai.providers.base import VLMProvider
+
+logger = logging.getLogger(__name__)
 
 EXTRACTION_PROMPT = """
 You are extracting a handwritten student answer sheet for automated grading.
@@ -142,17 +145,47 @@ def _number(value, *, name: str, minimum: float, maximum: float) -> float:
     return number
 
 
+def _clamped_coord(value, *, name: str, maximum: float) -> float:
+    """Like `_number`, but clamps into [0, maximum] instead of rejecting —
+    a VLM's own pixel estimate for a box it can plainly see is routinely
+    off by a few px (a table border a hair past the margin) or occasionally
+    wildly off on a diagram-heavy page (real observed case: a height
+    reported well past the page's actual height). Either way, it's a
+    precision error in a real answer, not a wrong answer, and rejecting the
+    whole page over it wastes 3 retries for nothing. Only a genuinely
+    non-numeric value (the model returning a string, null, etc.) still
+    raises — that's not a precision problem, it's a shape problem the
+    retry's clarified prompt can actually fix."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"VLM {name} must be numeric") from exc
+    return max(0.0, min(number, maximum))
+
+
 def _bbox(value, *, name: str, width: int, height: int) -> dict[str, float]:
     if not isinstance(value, dict):
         raise ValueError(f"VLM {name} must be an object")
-    x = _number(value.get("x"), name=f"{name}.x", minimum=0, maximum=width)
-    y = _number(value.get("y"), name=f"{name}.y", minimum=0, maximum=height)
-    w = _number(value.get("w"), name=f"{name}.w", minimum=0, maximum=width)
-    h = _number(value.get("h"), name=f"{name}.h", minimum=0, maximum=height)
+    # The prompt is explicit that bbox keys are "w"/"h" (EXTRACTION_PROMPT
+    # spells out the exact shape), but Gemini occasionally sends
+    # "width"/"height" instead — observed live (2026-10-02), and not on a
+    # garbled block either: real, correctly-transcribed answer text was
+    # being thrown away over this key-naming alone, which the per-block
+    # drop-and-continue fix would otherwise have silently hidden as "one
+    # less block" with no sign the content itself was ever fine. Falling
+    # back to the longer key name costs nothing when "w"/"h" are present
+    # (which stay the primary, documented key) and recovers the block
+    # when they're not.
+    x = _clamped_coord(value.get("x"), name=f"{name}.x", maximum=width)
+    y = _clamped_coord(value.get("y"), name=f"{name}.y", maximum=height)
+    w = _clamped_coord(value.get("w", value.get("width")), name=f"{name}.w", maximum=width)
+    h = _clamped_coord(value.get("h", value.get("height")), name=f"{name}.h", maximum=height)
+    # x/y are already clamped into [0, width]/[0, height] above, so
+    # tightening w/h to fit what's left is always geometrically valid.
+    w = min(w, width - x)
+    h = min(h, height - y)
     if w <= 0 or h <= 0:
         raise ValueError(f"VLM {name} must have positive width and height")
-    if x + w > width or y + h > height:
-        raise ValueError(f"VLM {name} extends outside the page")
     return {"x": x, "y": y, "w": w, "h": h}
 
 
@@ -179,15 +212,45 @@ def _block(value, *, width: int, height: int) -> ExtractedBlock:
     content_type = str(value.get("content_type", "")).upper()
     if content_type not in _CONTENT_TYPES:
         raise ValueError(f"Unknown VLM content type: {content_type!r}")
-    annotations = [
-        _annotation(item, width=width, height=height)
-        for item in value.get("annotations", [])
-    ]
-    if not isinstance(value.get("annotations", []), list):
+    raw_annotations = value.get("annotations", [])
+    if not isinstance(raw_annotations, list):
         raise ValueError("VLM annotations must be a list")
+    # A malformed annotation (observed live, 2026-10-02: a degenerate
+    # zero-area bbox — the same imprecision block bboxes have, except an
+    # annotation's own box is small to begin with, so the SAME few-px
+    # error is proportionally far more likely to clamp it to nothing) used
+    # to fail the entire page — not just that one mark, every block's real
+    # text and every question's real score, over one bad rectangle the
+    # grading never even reads (reconstructed_text already has struck text
+    # excluded by the VLM's own transcription, independent of whether the
+    # annotation box describing it parsed). Drop the one bad annotation
+    # instead; the overlay just shows one fewer box.
+    annotations = []
+    for item in raw_annotations:
+        try:
+            annotations.append(_annotation(item, width=width, height=height))
+        except ValueError as exc:
+            logger.warning("Dropping malformed VLM annotation %r: %s", item, exc)
+    bbox = _bbox(value.get("bbox"), name="block.bbox", width=width, height=height)
+    if content_type in ("TEXT", "TABLE"):
+        # The VLM's own bbox is a visual pixel estimate, and on a real
+        # photographed page it sometimes draws the box narrower than the
+        # content actually extends — confirmed live (2026-10-01) for both:
+        # a prose answer cropped to 58% of the page width, and a hand-drawn
+        # comparison table cropped the same way, both cutting off the right
+        # side of every line in the review screen. Grading was unaffected
+        # either time (it reads reconstructed_text, not the crop), but the
+        # crop exists so a teacher can check the transcription against the
+        # actual scan, and one missing real content defeats that. Prose and
+        # a table a student actually draws both tend to run edge margin to
+        # edge margin; a diagram or equation more plausibly sits in just
+        # part of the page, so those two are left at the VLM's own
+        # estimate. The VLM's own y/h (which answer block this is,
+        # vertically) stays as estimated in all cases.
+        bbox = {**bbox, "x": 0.0, "w": float(width)}
     return ExtractedBlock(
         question_number=(str(value["question_number"]).strip() if value.get("question_number") is not None else None),
-        bbox=_bbox(value.get("bbox"), name="block.bbox", width=width, height=height),
+        bbox=bbox,
         content_type=content_type,
         raw_text=str(value.get("raw_text", "")),
         reconstructed_text=str(value.get("reconstructed_text", "")),
@@ -213,7 +276,23 @@ def extract_page(image: np.ndarray, vlm: VLMProvider) -> ExtractedPage:
             values = data.get("blocks", [])
             if not isinstance(values, list):
                 raise ValueError("VLM blocks must be a list")
-            blocks = [_block(value, width=width, height=height) for value in values]
+            # Same reasoning as the per-annotation drop above, one level
+            # up: one malformed block (a bad bbox, an unrecognised
+            # content_type) used to fail every OTHER block on the page
+            # too — a student's fully correct answer to question 2 lost
+            # to a parsing error on question 1's block. Only re-prompt and
+            # retry the whole page when NOTHING on it parsed at all; a
+            # partially-bad response still keeps whatever did.
+            blocks = []
+            block_errors = []
+            for value in values:
+                try:
+                    blocks.append(_block(value, width=width, height=height))
+                except ValueError as exc:
+                    logger.warning("Dropping malformed VLM block %r: %s", value, exc)
+                    block_errors.append(str(exc))
+            if not blocks and values:
+                raise ValueError(f"every block on the page was malformed: {block_errors}")
             confidence = round(sum((block.confidence for block in blocks), 0.0) / len(blocks), 4) if blocks else 0.0
             return ExtractedPage(blocks=blocks, confidence=confidence)
         except ValueError as exc:

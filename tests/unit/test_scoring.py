@@ -36,10 +36,14 @@ from ai.scoring import (
         # llm=PARTIAL: always partial, regardless of similarity.
         (0.95, "PARTIAL", PARTIAL, Decimal("0.5")),
         (0.0, "PARTIAL", PARTIAL, Decimal("0.5")),
-        # llm=MISSING: similarity gets one more chance at PARTIAL_CREDIT.
-        (0.90, "MISSING", PARTIAL, Decimal("0.5")),
-        (SIMILARITY_PARTIAL_CREDIT, "MISSING", PARTIAL, Decimal("0.5")),  # boundary: inclusive
-        (SIMILARITY_PARTIAL_CREDIT - 0.01, "MISSING", MISSING, Decimal("0")),  # just under
+        # llm=MISSING: stands regardless of similarity — no override. A
+        # genuinely irrelevant answer and a real PARTIAL-credit answer
+        # overlap in similarity (0.78-0.89, live 2026-10-01 finding), so
+        # even a near-1.0 similarity must not rescue an explicit "missing".
+        (0.90, "MISSING", MISSING, Decimal("0")),
+        (SIMILARITY_FULL_CREDIT, "MISSING", MISSING, Decimal("0")),
+        (SIMILARITY_PARTIAL_CREDIT, "MISSING", MISSING, Decimal("0")),
+        (0.99, "MISSING", MISSING, Decimal("0")),
         (0.0, "MISSING", MISSING, Decimal("0")),
     ],
 )

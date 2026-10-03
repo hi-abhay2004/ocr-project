@@ -123,20 +123,23 @@ def evaluate_question(
             },
             concept_results=[
                 ConceptResult(
-                    concept_id=getattr(c, "id", None) or c["id"],
-                    text=getattr(c, "text", None) or c["text"],
+                    concept_id=c["id"] if isinstance(c, dict) else c.id,
+                    text=c["text"] if isinstance(c, dict) else c.text,
                     status="MISSING",
                     similarity=0.0,
                     marks=Decimal("0.0"),
-                    max_marks=Decimal(str(round(float(getattr(c, "weight", None) or c["weight"]) * float(max_marks), 2))),
+                    max_marks=Decimal(
+                        str(
+                            round(
+                                float(c["weight"] if isinstance(c, dict) else c.weight)
+                                * float(max_marks),
+                                2,
+                            )
+                        )
+                    ),
                     evidence="Empty answer block.",
                     disagreed=False,
-                    coverage=CoverageResult(
-                        verdict="MISSING",
-                        confidence=1.0,
-                        evidence="Empty answer block.",
-                        votes=[]
-                    )
+                    coverage=CoverageResult(verdict="MISSING", votes=[], agreement=1.0),
                 )
                 for c in concepts
             ]

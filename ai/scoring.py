@@ -1,23 +1,20 @@
 """
 L8 — concept scoring.
 
-Combines two independent signals into one COVERED/PARTIAL/MISSING verdict
-and a mark factor: retrieval similarity (ai.rag.retriever, cosine against
-the concept's own embedding) and the LLM's own coverage verdict
-(ai.coverage, triple-pass voted). Full credit needs BOTH signals to agree
-strongly; either signal alone is enough for partial credit — a single
-provider's mistake (a hallucinating LLM, or a retrieval miss on
-oddly-phrased but correct prose) never zeroes out a concept outright,
-it just caps the credit at half.
+Combines two signals into one COVERED/PARTIAL/MISSING verdict and a mark
+factor: retrieval similarity (ai.rag.retriever, cosine against the
+concept's own embedding) and the LLM's own coverage verdict (ai.coverage,
+triple-pass voted). They are NOT symmetric: an LLM "covered" that
+similarity doesn't corroborate is downgraded, never zeroed — the LLM read
+the actual answer text, which retrieval-alone banding didn't. An LLM
+"missing" is trusted outright, with no similarity override in the other
+direction (see band_concept's docstring for why: live data ruled it out,
+this isn't a style choice).
 """
 
 from decimal import ROUND_HALF_UP, Decimal
 
-from ai.config import (
-    SIMILARITY_FULL_CREDIT,
-    SIMILARITY_PARTIAL_CREDIT,
-    UNDERLINE_SIMILARITY_BOOST,
-)
+from ai.config import SIMILARITY_FULL_CREDIT, SIMILARITY_PARTIAL_CREDIT, UNDERLINE_SIMILARITY_BOOST
 
 COVERED = "COVERED"
 PARTIAL = "PARTIAL"
@@ -60,18 +57,25 @@ def band_concept(similarity: float, llm_verdict: str) -> tuple[str, Decimal]:
       zeroed to MISSING outright: the LLM read the actual answer text,
       which retrieval-alone banding didn't.
     - llm=PARTIAL: always partial credit, regardless of similarity.
-    - llm=MISSING: similarity gets one more chance — a retrieval hit
-      above SIMILARITY_PARTIAL_CREDIT overrides an LLM "missing" into
-      partial credit; below it, missing stands.
+    - llm=MISSING: stands, full stop — no similarity override. There used
+      to be one ("a retrieval hit above some threshold overrides an LLM
+      'missing' into partial credit"), on the theory that a high cosine
+      similarity could catch a retrieval miss on correct-but-oddly-phrased
+      prose. Live data killed that theory (2026-10-01): a genuinely
+      irrelevant answer (the wrong booklet entirely) landed at 0.78-0.80
+      similarity against every concept — and real, legitimately
+      PARTIAL-credit answers in this same system land at 0.776-0.89. The
+      two distributions overlap; there is no threshold that lets one
+      through without also letting the other through. Below
+      SIMILARITY_FULL_CREDIT, similarity cannot be trusted to overrule an
+      LLM that actually read the text and judged it doesn't address the
+      concept — so it doesn't get the chance to.
     """
     if llm_verdict == COVERED:
         if similarity >= SIMILARITY_FULL_CREDIT:
             return COVERED, FULL_FACTOR
         return PARTIAL, PARTIAL_FACTOR
     if llm_verdict == PARTIAL:
-        return PARTIAL, PARTIAL_FACTOR
-    # MISSING
-    if similarity >= SIMILARITY_PARTIAL_CREDIT:
         return PARTIAL, PARTIAL_FACTOR
     return MISSING, MISSING_FACTOR
 

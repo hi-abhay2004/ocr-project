@@ -66,6 +66,18 @@ class AnswerSheet(models.Model):
     band = models.CharField(max_length=10, choices=Band.choices, default=Band.RED)
     error_message = models.TextField(blank=True, default="")
     started_at = models.DateTimeField(auto_now_add=True)
+    # started_at is set once, at upload, and Django's auto_now_add means no
+    # later .save() can move it — correct for "-started_at" ordering (sort
+    # by upload time), wrong for anything that means "how long has the
+    # CURRENT attempt been running." A sheet retried after sitting QUEUED
+    # or FAILED for a day re-enters the pipeline with started_at still
+    # pointing at the original upload, so a naive now-minus-started_at
+    # elapsed-time display balloons to the sheet's total age instead of the
+    # current run's actual duration (observed 2026-10-01: a stuck, retried
+    # sheet showed "2316:37" of elapsed time). This is set fresh every time
+    # _run() actually begins — including on retry — and is what the
+    # frontend's elapsed-time clock should read instead.
+    last_run_started_at = models.DateTimeField(null=True, blank=True)
     approved_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:

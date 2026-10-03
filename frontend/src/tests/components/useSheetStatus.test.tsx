@@ -30,6 +30,7 @@ function scriptStatus(sequence: SheetStatus[]) {
         status,
         stage: status === 'DONE' ? 'done' : 'ocr',
         started_at: new Date().toISOString(),
+        last_run_started_at: new Date().toISOString(),
         error_message: null,
       })
     }),

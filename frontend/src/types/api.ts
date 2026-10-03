@@ -228,8 +228,26 @@ export interface Sheet {
   band: Band
   error_message: string | null
   started_at: string
+  // When the CURRENT run began — not when the sheet was first uploaded
+  // (started_at never moves after that). Use this for an elapsed-time
+  // display; started_at there balloons to the sheet's total age across a
+  // retry. Null only for a sheet uploaded before this field existed that
+  // has not been (re)run since.
+  last_run_started_at: string | null
   approved_at: string | null
   evaluations: QuestionEvaluation[]
+  pages: SheetPageImage[]
+}
+
+/** The ORIGINAL uploaded page — not a per-block crop. A block's own crop
+ * can be narrower than the real answer (the VLM's bbox estimate, or a
+ * page with several answer blocks shown as several separate crops) — this
+ * is the complete scan, for "view the uploaded booklet" (empty URL for a
+ * student: they never see the raw scan). */
+export interface SheetPageImage {
+  id: number
+  index: number
+  image_url: string
 }
 
 /** Row shape of GET /api/exams/{id}/sheets/ — the review queue (§3.3). */
@@ -251,6 +269,7 @@ export interface SheetStatusResponse {
   status: SheetStatus
   stage: Stage
   started_at: string
+  last_run_started_at: string | null
   error_message: string | null
 }
 

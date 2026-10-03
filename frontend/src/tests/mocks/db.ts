@@ -308,8 +308,13 @@ function makeSheet(sheetId: number, studentId: number, seed: number, status: She
     error_message:
       status === 'FAILED' ? 'OCR returned no text for page 2 — the scan may be blank or upside down.' : null,
     started_at: '2026-07-25T10:15:00Z',
+    last_run_started_at: '2026-07-25T10:15:00Z',
     approved_at: status === 'APPROVED' ? '2026-07-25T11:02:00Z' : null,
     evaluations,
+    pages: [
+      { id: sheetId * 10, index: 0, image_url: FIXTURE_CROP_URL },
+      { id: sheetId * 10 + 1, index: 1, image_url: FIXTURE_CROP_URL },
+    ],
   }
 }
 

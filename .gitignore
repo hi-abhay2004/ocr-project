@@ -13,6 +13,7 @@ htmlcov/
 # Django
 *.log
 media/
+media_test/
 staticfiles/
 db.sqlite3
 
@@ -23,6 +24,9 @@ db.sqlite3
 
 # Datasets (downloaded, not committed)
 datasets/
+
+# Scratch test booklets (personal uploads, not fixtures)
+/booklets/
 
 # Node (frontend has its own, this covers root-level tooling if any)
 node_modules/

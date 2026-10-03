@@ -172,10 +172,31 @@ CELERY_TASK_SOFT_TIME_LIMIT = 600
 CELERY_TASK_TIME_LIMIT = 660
 CELERY_TASK_ACKS_LATE = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+# ACKS_LATE means a task a worker was holding when it died gets redelivered
+# to another worker — but only once Redis (acting as the broker) considers
+# that message's delivery attempt expired. Celery's own default for that,
+# on a Redis broker, is 3600s (1 hour) — far longer than
+# CELERY_TASK_TIME_LIMIT above, so a worker that's SIGKILLed (not a clean
+# timeout: an OOM kill, a forced process stop, a crashed pool) can leave a
+# sheet showing QUEUED with no worker actually holding it for up to an
+# hour before anything else picks it up. Observed directly (2026-10-01).
+# Set close to the task's own time limit instead: long enough that a
+# genuinely still-running task is never prematurely considered dead and
+# redelivered to a second worker, short enough that a truly abandoned one
+# doesn't make a teacher watch a stuck spinner for the better part of an
+# hour.
+CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": CELERY_TASK_TIME_LIMIT + 120}
 
 # ── Uploads ──────────────────────────────────────────────────────────────
 MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024
 ALLOWED_UPLOAD_CONTENT_TYPES = ["image/jpeg", "image/png", "application/pdf"]
+# Per-file size alone doesn't bound total work: nothing capped how many
+# files (or how many pages inside one PDF) a single upload could contain —
+# a teacher account could submit an unbounded number of 10 MB files, or one
+# PDF with hundreds of pages, each rendered at 200 DPI by the single Celery
+# worker. These two together cap that.
+MAX_UPLOAD_PAGE_COUNT = 20
+MAX_UPLOAD_TOTAL_SIZE_BYTES = 40 * 1024 * 1024
 
 # ── Evaluation pipeline (stub, Phase B3; real pipeline lands in B6) ──────
 # Seconds slept between each of the 12 stub stages so a human watching the

@@ -65,6 +65,18 @@ def _decode_pages(sheet_page) -> list[np.ndarray]:
         images = []
         doc = pymupdf.open(stream=raw, filetype="pdf")
         try:
+            # The upload boundary (SheetUploadSerializer) only sees the raw
+            # PDF bytes and can't know its page count without parsing it —
+            # so a PDF with hundreds of pages passed that check fine. This
+            # is the first place the real page count is known, and it must
+            # be checked before the render loop below, not after: each
+            # iteration is a real 200 DPI rasterisation, the actual
+            # expensive part a malicious or oversized PDF would exploit.
+            if doc.page_count > settings.MAX_UPLOAD_PAGE_COUNT:
+                raise ValueError(
+                    f"PDF has {doc.page_count} pages — "
+                    f"the limit is {settings.MAX_UPLOAD_PAGE_COUNT}."
+                )
             for page in doc:
                 pix = page.get_pixmap(dpi=200)
                 arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(

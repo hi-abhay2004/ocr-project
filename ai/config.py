@@ -64,6 +64,16 @@ TEXT_DENSITY_CUTOFF = 0.15
 SIMILARITY_FULL_CREDIT = 0.72  # similarity >= this AND llm=covered  -> full weight
 SIMILARITY_PARTIAL_CREDIT = 0.50  # similarity >= this (or llm=partial) -> half weight
 SIMILARITY_DOWNGRADE = 0.45  # llm says "covered" but similarity < this -> downgrade to partial
+# ai.scoring.band_concept used to let a high-enough similarity override an
+# explicit LLM "missing" verdict into partial credit — removed 2026-10-01.
+# Real data ruled out any threshold for it: a genuinely irrelevant answer
+# (wrong booklet entirely) and a real, legitimately PARTIAL-credit answer
+# both land in the same 0.78-0.89 similarity band against this embedding
+# model, for the mundane reason that both are prose in the same technical
+# subject. No cutoff separates "wrong answer, right subject" from "right
+# answer, imperfect retrieval" in that range, so the override couldn't be
+# made safe by tuning a number — it's gone, not raised. An LLM "missing"
+# verdict is trusted as-is now.
 
 # Underlined chunks get their similarity boosted before banding (capped at 1.0).
 UNDERLINE_SIMILARITY_BOOST = 1.10

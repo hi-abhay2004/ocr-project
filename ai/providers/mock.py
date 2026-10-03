@@ -135,8 +135,11 @@ def _feedback_for(prompt: str) -> dict:
     return {"strengths": strengths, "gaps": gaps, "suggestions": suggestions}
 
 
+_DEFAULT_VLM_RESPONSE = "mock vision description"
+
+
 class MockVLMProvider(VLMProvider):
-    def __init__(self, response: str = "mock vision description"):
+    def __init__(self, response: str = _DEFAULT_VLM_RESPONSE):
         self.response = response
         self.call_count = 0
         self.calls: list[tuple[bytes, str]] = []
@@ -144,7 +147,42 @@ class MockVLMProvider(VLMProvider):
     def describe_image(self, image_bytes: bytes, prompt: str) -> str:
         self.call_count += 1
         self.calls.append((image_bytes, prompt))
+        # ai.ocr.vlm_extractor's VLM-first extraction prompt is the one
+        # caller that requires a specific JSON shape back (bbox, content
+        # type, etc.) rather than free text — every other VLM call site
+        # (annotation adjudication, plain transcription, diagram/table/
+        # equation description) is happy with `self.response` as-is. Only
+        # synthesize one when the caller left `response` at its default —
+        # a caller that passed its own `response=` (test_vlm_extractor.py's
+        # whole job) means that exact string, verbatim, extraction prompt
+        # or not.
+        if self.response == _DEFAULT_VLM_RESPONSE and (
+            "Inspect the entire page and return ONLY valid JSON" in prompt
+        ):
+            return self._extraction_response(image_bytes)
         return self.response
+
+    def _extraction_response(self, image_bytes: bytes) -> str:
+        import cv2
+        import numpy as np
+
+        image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+        height, width = image.shape[:2] if image is not None else (100, 100)
+        return json.dumps(
+            {
+                "blocks": [
+                    {
+                        "question_number": None,
+                        "bbox": {"x": 0, "y": 0, "w": width, "h": height},
+                        "content_type": "TEXT",
+                        "raw_text": self.response,
+                        "reconstructed_text": self.response,
+                        "confidence": 0.9,
+                        "annotations": [],
+                    }
+                ]
+            }
+        )
 
 
 class MockEmbeddingProvider(EmbeddingProvider):

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { AlertCircle, Check, RotateCw, ScanEye, Sparkles } from 'lucide-react'
+import { AlertCircle, Check, ImageIcon, RotateCw, ScanEye, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -24,7 +24,7 @@ import { ScoreOverrideForm } from '@/components/ScoreOverrideForm'
 import { ErrorState } from '@/components/states/ErrorState'
 import { Loading } from '@/components/states/Loading'
 import { useOverrideMarks } from '@/hooks/useEvaluation'
-import { useApproveSheet, useRetrySheet, useSheet, useSheetStatus } from '@/hooks/useSheets'
+import { useApproveSheet, useCancelSheet, useRetrySheet, useSheet, useSheetStatus } from '@/hooks/useSheets'
 import { cn } from '@/lib/utils'
 
 /**
@@ -48,6 +48,7 @@ export function ReviewDetail() {
   const override = useOverrideMarks(sheetId, examId)
   const approve = useApproveSheet(examId)
   const retry = useRetrySheet(examId)
+  const cancel = useCancelSheet(examId)
 
   const [activeQuestion, setActiveQuestion] = useState<string>('')
   const [approveOpen, setApproveOpen] = useState(false)
@@ -70,8 +71,20 @@ export function ReviewDetail() {
             Evaluating {sheet.student.name}'s sheet — results appear here automatically
           </CardTitle>
         </CardHeader>
-        <CardContent>
-          <PipelineProgress stage={sheet.stage} status={sheet.status} startedAt={sheet.started_at} />
+        <CardContent className="space-y-4">
+          <PipelineProgress
+            stage={sheet.stage}
+            status={sheet.status}
+            startedAt={sheet.last_run_started_at ?? sheet.started_at}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => cancel.mutate(sheet.id)}
+            disabled={cancel.isPending}
+          >
+            Cancel evaluation
+          </Button>
         </CardContent>
       </Card>
     )
@@ -128,6 +141,20 @@ export function ReviewDetail() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {/* The per-block crops below are the grader's own view of each
+              answer region — the VLM's own bbox for one can be narrower
+              than the real content, and a page with several answer blocks
+              shows as several separate crops rather than one sheet. This
+              opens the actual uploaded file(s), unmodified, so a teacher
+              can always see exactly what the student submitted. */}
+          {sheet.pages.map((page) => (
+            <Button key={page.id} variant="outline" size="sm" asChild>
+              <a href={page.image_url} target="_blank" rel="noopener noreferrer">
+                <ImageIcon className="size-4" />
+                {sheet.pages.length > 1 ? `View page ${page.index + 1}` : 'View uploaded booklet'}
+              </a>
+            </Button>
+          ))}
           <ConfidenceBadge score={sheet.confidence} />
           <BandPill band={sheet.band} />
           {escalatedCount > 0 && (
@@ -199,37 +226,46 @@ export function ReviewDetail() {
               </TabsList>
 
               {/* ── Overlay ─────────────────────────────────────────── */}
-              <TabsContent value="overlay" className="space-y-6 pt-4">
-                {current.blocks.map((block) => (
-                  <div key={block.id} className="grid gap-4 lg:grid-cols-2">
-                    <div className="space-y-3">
-                      <AnnotationOverlay block={block} />
-                      <AnnotationLegend />
-                    </div>
-
-                    <div className="space-y-3">
-                      <div className="flex flex-wrap items-center gap-2 text-xs">
+              {/* One question's answer can span several detected blocks
+                  (the VLM splits a page by visual region, not by question) —
+                  these render as ONE continuous answer, not a separate
+                  framed card per block with its own repeated badges/"What
+                  the grader read" box/legend (reported 2026-10-01: looked
+                  like the image had been "divided"). Each block keeps its
+                  own AnnotationOverlay (its bbox coordinates are only valid
+                  within its own crop) and its own small OCR/quality tag, but
+                  everything else — the legend, the "what the grader read"
+                  label — appears exactly once for the whole question. */}
+              <TabsContent value="overlay" className="grid gap-4 pt-4 md:grid-cols-2">
+                <div className="space-y-0 overflow-hidden rounded-md border">
+                  {current.blocks.map((block) => (
+                    <div key={block.id} className="border-b last:border-b-0">
+                      <div className="flex flex-wrap items-center gap-2 px-3 py-1.5 text-xs">
                         <Badge variant="outline" className="font-mono">
                           {block.ocr_engine}
                         </Badge>
                         <Badge variant="outline" className="font-mono">
                           quality {block.quality_score.toFixed(2)}
                         </Badge>
-                        <span className="text-muted-foreground">
-                          {block.quality_score >= 0.6
-                            ? 'good scan — standard OCR path'
-                            : 'poor scan — escalated OCR path'}
-                        </span>
                       </div>
-                      <div className="bg-muted/30 rounded-lg border p-3">
-                        <p className="text-muted-foreground mb-2 text-xs font-medium">
-                          What the grader read
-                        </p>
-                        <ReconstructedText block={block} />
-                      </div>
+                      <AnnotationOverlay block={block} frameless />
+                    </div>
+                  ))}
+                </div>
+
+                <div className="space-y-4">
+                  <div className="bg-muted/30 rounded-lg border p-3">
+                    <p className="text-muted-foreground mb-2 text-xs font-medium">
+                      What the grader read
+                    </p>
+                    <div className="divide-y">
+                      {current.blocks.map((block) => (
+                        <ReconstructedText key={block.id} block={block} className="py-2 first:pt-0 last:pb-0" />
+                      ))}
                     </div>
                   </div>
-                ))}
+                  <AnnotationLegend />
+                </div>
               </TabsContent>
 
               {/* ── Concepts ────────────────────────────────────────── */}

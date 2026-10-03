@@ -348,6 +348,7 @@ export const handlers = [
       status: sheet.status,
       stage: sheet.stage,
       started_at: sheet.started_at,
+      last_run_started_at: sheet.last_run_started_at,
       error_message: sheet.error_message,
     })
   }),
@@ -367,6 +368,21 @@ export const handlers = [
     if (!sheet) return HttpResponse.json({ detail: 'Not found.' }, { status: 404 })
     sheet.error_message = null
     createSheetRetry(sheet.id)
+    return HttpResponse.json(sheet)
+  }),
+
+  http.post('/api/sheets/:sheetId/cancel/', ({ request, params }) => {
+    if (!userFromRequest(request)) return unauthorized()
+    const sheet = sheets.find((s) => s.id === Number(params.sheetId))
+    if (!sheet) return HttpResponse.json({ detail: 'Not found.' }, { status: 404 })
+    if (sheet.status !== 'QUEUED' && sheet.status !== 'RUNNING') {
+      return HttpResponse.json(
+        { detail: 'Only a queued or running evaluation can be cancelled.' },
+        { status: 400 },
+      )
+    }
+    sheet.status = 'FAILED'
+    sheet.error_message = 'Cancelled by teacher.'
     return HttpResponse.json(sheet)
   }),
 

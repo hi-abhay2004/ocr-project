@@ -36,6 +36,14 @@ export async function retrySheet(sheetId: number) {
   return data
 }
 
+/** Only ever resolves the database state — a worker mid-task notices and
+ * stops on its own, at most one stage later; this can't interrupt it
+ * directly. Only valid while QUEUED or RUNNING. */
+export async function cancelSheet(sheetId: number) {
+  const { data } = await api.post<Sheet>(`/sheets/${sheetId}/cancel/`)
+  return data
+}
+
 /** Publishes the sheet to the student. Irreversible from the student's view. */
 export async function approveSheet(sheetId: number) {
   const { data } = await api.post<Sheet>(`/sheets/${sheetId}/approve/`)

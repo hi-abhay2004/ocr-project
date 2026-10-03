@@ -15,7 +15,7 @@ import {
 } from '@/components/ui/select'
 import { PipelineProgress } from '@/components/PipelineProgress'
 import { ErrorState } from '@/components/states/ErrorState'
-import { useRetrySheet, useSheetStatus, useUploadSheet } from '@/hooks/useSheets'
+import { useCancelSheet, useRetrySheet, useSheetStatus, useUploadSheet } from '@/hooks/useSheets'
 import { useStudents } from '@/hooks/useStudents'
 import { cn } from '@/lib/utils'
 
@@ -27,6 +27,7 @@ export function SheetUpload() {
   const { data: students, isPending: studentsPending, error: studentsError } = useStudents(examId)
   const upload = useUploadSheet(examId)
   const retry = useRetrySheet(examId)
+  const cancel = useCancelSheet(examId)
 
   const [studentId, setStudentId] = useState<string>('')
   const [files, setFiles] = useState<File[]>([])
@@ -200,7 +201,7 @@ export function SheetUpload() {
               <PipelineProgress
                 stage={status.data.stage}
                 status={status.data.status}
-                startedAt={status.data.started_at}
+                startedAt={status.data.last_run_started_at ?? status.data.started_at}
                 errorMessage={status.data.error_message}
               />
             )}
@@ -215,6 +216,11 @@ export function SheetUpload() {
                 <Button variant="outline" onClick={() => retry.mutate(sheetId)}>
                   <RotateCw className="size-4" />
                   Retry evaluation
+                </Button>
+              )}
+              {!terminal && sheetId && (
+                <Button variant="outline" onClick={() => cancel.mutate(sheetId)} disabled={cancel.isPending}>
+                  Cancel evaluation
                 </Button>
               )}
               <Button variant={terminal ? 'outline' : 'secondary'} onClick={startAnother}>

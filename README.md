@@ -31,6 +31,12 @@ python manage.py createsuperuser      # optional
 
 python manage.py runserver            # :8000
 celery -A config worker -l info       # separate terminal — required for uploads to evaluate
+                                       # Windows: add --pool=solo. Celery's default pool
+                                       # (billiard/multiprocessing) doesn't work right on
+                                       # Windows — observed 2026-10-01: it kept spawning worker
+                                       # processes that never exited, ~30 orphaned after under
+                                       # an hour, enough to make unrelated commands fail with
+                                       # "insufficient system resources" (WinError 1450).
 
 python scripts/seed_demo.py           # one full exam with real (mocked-provider) evaluation results
 ```

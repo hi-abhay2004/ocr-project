@@ -41,7 +41,20 @@ const INTENT_LABEL: Record<Annotation['intent'], string> = {
   INSERTION: 'stitched into the answer',
 }
 
-export function AnnotationOverlay({ block, className }: { block: Block; className?: string }) {
+export function AnnotationOverlay({
+  block,
+  className,
+  frameless = false,
+}: {
+  block: Block
+  className?: string
+  /** Drops this block's own border/rounded corners/background on the
+   * image frame — for when several of a question's blocks are stacked
+   * inside ONE shared outer frame (ReviewDetail) and each one having its
+   * own border reads as several separate images rather than one
+   * continuous answer. */
+  frameless?: boolean
+}) {
   const [hidden, setHidden] = useState<Set<AnnotationKind>>(new Set())
   const [hovered, setHovered] = useState<Annotation | null>(null)
 
@@ -99,11 +112,23 @@ export function AnnotationOverlay({ block, className }: { block: Block; classNam
         </div>
       )}
 
-      <div className="relative inline-block w-full overflow-hidden rounded-md border bg-white">
+      <div
+        className={cn(
+          'relative inline-block max-w-full overflow-hidden bg-white',
+          !frameless && 'rounded-md border',
+        )}
+      >
         <img
           src={block.crop_image_url}
           alt={`Answer crop for question block ${block.id}`}
-          className="block h-auto w-full"
+          // 40vh alone is unbounded on a tall/high-res display — a real
+          // phone-photo page (or the whole-page fallback crop used when
+          // the VLM's own block geometry looks unreliable) can still end
+          // up rendering several hundred px tall, dominating the screen
+          // and pushing "what the grader read" below the fold (reported
+          // 2026-10-01). min() keeps a hard ceiling regardless of viewport
+          // height.
+          className="block max-h-[min(40vh,320px)] w-auto max-w-full"
           draggable={false}
         />
 

@@ -7,6 +7,7 @@ urlpatterns = [
     path("exams/<int:exam_id>/summary/", views.ExamSummaryView.as_view(), name="exam-summary"),
     path("sheets/<int:sheet_id>/status/", views.SheetStatusView.as_view(), name="sheet-status"),
     path("sheets/<int:sheet_id>/retry/", views.SheetRetryView.as_view(), name="sheet-retry"),
+    path("sheets/<int:sheet_id>/cancel/", views.SheetCancelView.as_view(), name="sheet-cancel"),
     path("sheets/<int:sheet_id>/approve/", views.SheetApproveView.as_view(), name="sheet-approve"),
     path("sheets/<int:sheet_id>/", views.SheetDetailView.as_view(), name="sheet-detail"),
     path(

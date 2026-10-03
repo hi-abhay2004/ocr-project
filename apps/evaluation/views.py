@@ -104,10 +104,64 @@ class SheetRetryView(APIView):
 
     def post(self, request, sheet_id):
         sheet = _get_owned_sheet(request, sheet_id)
-        sheet.status = AnswerSheet.Status.QUEUED
-        sheet.error_message = ""
-        sheet.save(update_fields=["status", "error_message"])
+
+        # FAILED (recover from a bad provider call) and DONE (regrade
+        # before approving — an intentional, pre-existing feature) are
+        # both fine to retry. APPROVED is not: retrying it would silently
+        # delete and rebuild its evaluations (pipeline_runner.
+        # create_real_evaluations starts with
+        # `sheet.evaluations.all().delete()`), discarding a teacher's
+        # overrides and un-approving a result the student may already
+        # have seen — with no warning, since the frontend only ever
+        # renders this button for a FAILED sheet and so never surfaced
+        # the gap for APPROVED.
+        #
+        # The filter+update is one atomic statement, not a read-then-
+        # write: two retry clicks (or a flaky client retrying its own
+        # request) racing each other both go through this same
+        # conditional UPDATE, so only one of them finds a matching row
+        # and flips it — the second finds nothing to update and reports
+        # the conflict instead of enqueueing a second worker against the
+        # same sheet.
+        updated = AnswerSheet.objects.filter(
+            id=sheet.id, status__in=(AnswerSheet.Status.FAILED, AnswerSheet.Status.DONE)
+        ).update(status=AnswerSheet.Status.QUEUED, error_message="")
+        if not updated:
+            return Response(
+                {"detail": "An approved result can't be retried."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         evaluate_sheet.delay(sheet.id)
+        sheet.refresh_from_db()
+        return Response(SheetSerializer(sheet).data)
+
+
+class SheetCancelView(APIView):
+    """Lets a teacher give up on a sheet that's taking too long, rather than
+    watch QUEUED or RUNNING indefinitely with no way to make it stop
+    (2026-10-01). This only ever resolves the DATABASE state — it can't
+    reach into a worker thread mid-flight and interrupt it (Celery's
+    `threads` pool has no safe mechanism for that; the worker finds out on
+    its own, at most one stage later, via the status check tasks.py's
+    _run() does on every loop iteration). For a QUEUED sheet a worker
+    hasn't touched yet, this is immediate and complete."""
+
+    permission_classes = [permissions.IsAuthenticated, IsTeacher]
+
+    def post(self, request, sheet_id):
+        sheet = _get_owned_sheet(request, sheet_id)
+
+        updated = AnswerSheet.objects.filter(
+            id=sheet.id, status__in=(AnswerSheet.Status.QUEUED, AnswerSheet.Status.RUNNING)
+        ).update(status=AnswerSheet.Status.FAILED, error_message="Cancelled by teacher.")
+        if not updated:
+            return Response(
+                {"detail": "Only a queued or running evaluation can be cancelled."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        sheet.refresh_from_db()
         return Response(SheetSerializer(sheet).data)
 
 

@@ -4,7 +4,7 @@ from rest_framework import serializers
 
 from apps.students.serializers import StudentSerializer
 
-from .models import Annotation, AnswerBlock, AnswerSheet, ConceptScore, Evaluation
+from .models import Annotation, AnswerBlock, AnswerSheet, ConceptScore, Evaluation, SheetPage
 
 
 class MarksMixin:
@@ -59,6 +59,33 @@ class AnswerBlockSerializer(serializers.ModelSerializer):
         if self.context.get("for_student"):
             data["crop_image_url"] = ""
             data["raw_text"] = ""
+        return data
+
+
+class SheetPageSerializer(serializers.ModelSerializer):
+    """The ORIGINAL uploaded page — not a per-block crop. Exists so the
+    review screen can offer "view the complete uploaded booklet" alongside
+    the per-block crops: the VLM's own bbox for a block is sometimes
+    narrower than the actual answer content (2026-10-01), and even once
+    that's widened per-block, a page with several answer blocks still
+    shows as several separate crops rather than the one scanned sheet a
+    teacher actually wants to glance at."""
+
+    image_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SheetPage
+        fields = ["id", "index", "image_url"]
+
+    def get_image_url(self, obj) -> str:
+        return obj.image.url if obj.image else ""
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Students never see the raw scan (§8 screen 12) — same boundary
+        # AnswerBlockSerializer already draws for crop_image_url.
+        if self.context.get("for_student"):
+            data["image_url"] = ""
         return data
 
 
@@ -152,6 +179,7 @@ class SheetSerializer(serializers.ModelSerializer, MarksMixin):
     total_marks = serializers.SerializerMethodField()
     max_marks = serializers.SerializerMethodField()
     evaluations = QuestionEvaluationSerializer(many=True, read_only=True)
+    pages = SheetPageSerializer(many=True, read_only=True)
 
     class Meta:
         model = AnswerSheet
@@ -169,8 +197,10 @@ class SheetSerializer(serializers.ModelSerializer, MarksMixin):
             "band",
             "error_message",
             "started_at",
+            "last_run_started_at",
             "approved_at",
             "evaluations",
+            "pages",
         ]
         read_only_fields = fields
 
@@ -205,7 +235,7 @@ class SheetStatusSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = AnswerSheet
-        fields = ["id", "status", "stage", "started_at", "error_message"]
+        fields = ["id", "status", "stage", "started_at", "last_run_started_at", "error_message"]
 
 
 class StudentResultSerializer(serializers.ModelSerializer, MarksMixin):

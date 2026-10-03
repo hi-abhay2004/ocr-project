@@ -27,6 +27,28 @@ SYSTEM_PROMPT = (
 VALID_VERDICTS = ("COVERED", "PARTIAL", "MISSING")
 _VERDICT_RE = re.compile(r"\b(COVERED|PARTIAL|MISSING)\b", re.IGNORECASE)
 
+# Live finding (2026-10-01): with no rubric, a single pass sometimes called
+# an excerpt from a COMPLETELY different question — correct prose, wrong
+# topic, sharing only domain vocabulary ("table", "row", "relation") —
+# PARTIAL instead of MISSING. That is not a borderline case this prompt
+# should leave to a coin flip: the excerpt never engages with the concept
+# at all. The old one-line "Does the excerpt cover the concept?" gave the
+# model no definition of PARTIAL to anchor against, so superficial
+# word-overlap read as "close enough." This version makes the topic check
+# the FIRST, binary gate, and only asks about completeness once that gate
+# passes.
+_COVERAGE_RUBRIC = (
+    "First decide: does the excerpt actually discuss THIS concept's "
+    "specific topic — not just the same general subject area? An excerpt "
+    "about a different concept from the same subject (sharing only "
+    "incidental vocabulary) does NOT discuss this concept's topic, even if "
+    "it is accurate on its own terms.\n\n"
+    "- If no: MISSING. This is the answer whenever the excerpt is "
+    "off-topic for this specific concept, however well-written it is.\n"
+    "- If yes, and it states the concept fully and correctly: COVERED.\n"
+    "- If yes, but incompletely, vaguely, or with an error: PARTIAL."
+)
+
 
 @dataclass
 class CoverageVote:
@@ -46,8 +68,9 @@ def build_prompt(concept_text: str, retrieved_text: str) -> str:
     return (
         f"<concept>\n{concept_text.strip()}\n</concept>\n\n"
         f"<excerpt>\n{excerpt}\n</excerpt>\n\n"
-        "Does the excerpt cover the concept? Reply with EXACTLY this JSON "
-        'shape: {"verdict": "COVERED" | "PARTIAL" | "MISSING"}'
+        f"{_COVERAGE_RUBRIC}\n\n"
+        "Reply with EXACTLY this JSON shape: "
+        '{"verdict": "COVERED" | "PARTIAL" | "MISSING"}'
     )
 
 

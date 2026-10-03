@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { approveSheet, getSheet, getSheetStatus, retrySheet, uploadSheet } from '@/api/sheets'
+import { approveSheet, cancelSheet, getSheet, getSheetStatus, retrySheet, uploadSheet } from '@/api/sheets'
 import { errorMessage } from '@/lib/axios'
 import { TERMINAL_STATUSES, type SheetStatus } from '@/types/api'
 import { qk } from './keys'
@@ -91,6 +91,20 @@ export function useRetrySheet(examId?: number) {
       toast.success('Re-queued for evaluation')
     },
     onError: (e) => toast.error(errorMessage(e, 'Could not retry')),
+  })
+}
+
+export function useCancelSheet(examId?: number) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (sheetId: number) => cancelSheet(sheetId),
+    onSuccess: (sheet) => {
+      qc.invalidateQueries({ queryKey: qk.sheet(sheet.id) })
+      qc.invalidateQueries({ queryKey: qk.sheetStatus(sheet.id) })
+      if (examId !== undefined) qc.invalidateQueries({ queryKey: qk.sheetsAll(examId) })
+      toast.success('Cancelled')
+    },
+    onError: (e) => toast.error(errorMessage(e, 'Could not cancel')),
   })
 }
 
