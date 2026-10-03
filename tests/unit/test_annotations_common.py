@@ -46,3 +46,26 @@ def test_a_short_line_does_not_count_toward_or_get_caught_by_the_pattern():
     ys = ruled_paper_line_ys(lines, block_width=1000)
     assert ys == {40, 100, 160}
     assert 280 not in ys
+
+
+def test_a_single_full_width_line_pinned_to_a_blocks_own_edge_is_flagged_without_a_count():
+    # Live finding (2026-10-03): a single-answer crop usually only shows
+    # the ONE ruled line nearest its own top/bottom boundary, never
+    # several — the count-based check above never fires in that context,
+    # so a genuine ruled-paper boundary line was being accepted as a
+    # confident hand-drawn STRIKE/UNDERLINE. Position alone (sitting right
+    # at the crop's own edge) is enough to call this one suspect, with no
+    # count needed — only checked when the caller passes block_height.
+    near_top = _full_width_line(5)
+    lines = [near_top]
+    assert ruled_paper_line_ys(lines, block_width=1000, block_height=400) == {5}
+
+
+def test_a_single_full_width_line_in_the_middle_of_a_block_is_not_flagged_by_position():
+    # Contrast with the edge case above: a line sitting well inside the
+    # block (not near either edge) gets no help from the position signal —
+    # still needs the count-based pattern, same as before block_height
+    # existed at all.
+    middle = _full_width_line(200)
+    lines = [middle]
+    assert ruled_paper_line_ys(lines, block_width=1000, block_height=400) == set()

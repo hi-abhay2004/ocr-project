@@ -41,7 +41,8 @@ Return exactly this shape:
           "bbox": {"x": 0, "y": 0, "w": 10, "h": 10},
           "confidence": 0.0
         }
-      ]
+      ],
+      "underlined_words": ["exact word or short phrase", "another one"]
     }
   ]
 }
@@ -55,6 +56,25 @@ Rules:
 - annotation intent must be CORRECTION, EMPHASIS, or INSERTION.
 - Use reconstructed_text for what should be graded. Omit text that is clearly
   crossed out. Preserve meaningful margin insertions in the answer.
+- MANDATORY: every mark you can see on the page must appear in annotations,
+  with a real bbox drawn tightly around that exact mark on the page — not
+  just reflected as a change between raw_text and reconstructed_text. If you
+  excluded any words from reconstructed_text because they were struck out,
+  you must add a matching STRIKE annotation for each one. If you pulled any
+  text in from the margin, add a matching MARGIN annotation (and an ARROW
+  annotation too if a drawn arrow pointed to it). If any word anywhere on the
+  page is underlined, add an UNDERLINE annotation for it even though the
+  text itself doesn't change — underlines carry no text edit, so they are
+  the easiest mark to silently skip; do not skip them.
+- An underline or strike is a thin LINE, not a filled box — give it a small
+  bbox height (a few pixels), not the height of the whole word or line it
+  sits under/through. Report its real thinness; do not pad it out.
+- underlined_words: list the exact word or short phrase text for every
+  underline on this block, in reading order — this is in ADDITION to the
+  UNDERLINE entries in annotations above, not instead of them. You are
+  reading text here, not estimating a pixel position, so get this list
+  right even on a block where the UNDERLINE bbox above might be rough.
+  Empty list if nothing on this block is underlined.
 - If the page is blank or unreadable, return {"blocks": []}.
 - Confidence values must be between 0.0 and 1.0.
 """.strip()
@@ -77,6 +97,7 @@ class ExtractedBlock:
     reconstructed_text: str
     confidence: float
     annotations: list[ExtractedAnnotation] = field(default_factory=list)
+    underlined_words: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -163,7 +184,9 @@ def _clamped_coord(value, *, name: str, maximum: float) -> float:
     return max(0.0, min(number, maximum))
 
 
-def _bbox(value, *, name: str, width: int, height: int) -> dict[str, float]:
+def _bbox(
+    value, *, name: str, width: int, height: int, min_size: float = 0.0
+) -> dict[str, float]:
     if not isinstance(value, dict):
         raise ValueError(f"VLM {name} must be an object")
     # The prompt is explicit that bbox keys are "w"/"h" (EXTRACTION_PROMPT
@@ -184,6 +207,18 @@ def _bbox(value, *, name: str, width: int, height: int) -> dict[str, float]:
     # tightening w/h to fit what's left is always geometrically valid.
     w = min(w, width - x)
     h = min(h, height - y)
+    # A genuine underline or strike IS a thin line, not a filled box — the
+    # VLM's own pixel estimate for one routinely rounds to w/h of 0 or 1
+    # (observed live, 2026-10-03: real, correctly-identified underlines
+    # dropped here every time, never reaching the DB). min_size floors w/h
+    # back up to a visible mark instead of rejecting a detection the model
+    # already got right, the same way underline.py's own CV detector always
+    # emits a fixed h=4.0 for exactly this reason. Only applied where the
+    # caller says a thin mark is plausible (annotations) — a block's own
+    # bbox staying genuinely zero-sized is still a real error, not this.
+    if min_size > 0:
+        w = max(w, min(min_size, width - x))
+        h = max(h, min(min_size, height - y))
     if w <= 0 or h <= 0:
         raise ValueError(f"VLM {name} must have positive width and height")
     return {"x": x, "y": y, "w": w, "h": h}
@@ -201,7 +236,9 @@ def _annotation(value, *, width: int, height: int) -> ExtractedAnnotation:
     return ExtractedAnnotation(
         kind=kind,
         intent=intent,
-        bbox=_bbox(value.get("bbox"), name="annotation.bbox", width=width, height=height),
+        bbox=_bbox(
+            value.get("bbox"), name="annotation.bbox", width=width, height=height, min_size=4.0
+        ),
         confidence=_number(value.get("confidence"), name="annotation.confidence", minimum=0, maximum=1),
     )
 
@@ -248,6 +285,10 @@ def _block(value, *, width: int, height: int) -> ExtractedBlock:
         # estimate. The VLM's own y/h (which answer block this is,
         # vertically) stays as estimated in all cases.
         bbox = {**bbox, "x": 0.0, "w": float(width)}
+    raw_underlined_words = value.get("underlined_words", [])
+    if not isinstance(raw_underlined_words, list):
+        raw_underlined_words = []
+    underlined_words = [str(w).strip() for w in raw_underlined_words if str(w).strip()]
     return ExtractedBlock(
         question_number=(str(value["question_number"]).strip() if value.get("question_number") is not None else None),
         bbox=bbox,
@@ -256,6 +297,7 @@ def _block(value, *, width: int, height: int) -> ExtractedBlock:
         reconstructed_text=str(value.get("reconstructed_text", "")),
         confidence=_number(value.get("confidence"), name="block.confidence", minimum=0, maximum=1),
         annotations=annotations,
+        underlined_words=underlined_words,
     )
 
 

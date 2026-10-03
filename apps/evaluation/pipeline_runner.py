@@ -33,7 +33,9 @@ import pymupdf
 from django.conf import settings
 from django.core.files.base import ContentFile
 
-from ai.annotations.adjudicator import adjudicate
+from ai.annotations import strikethrough, underline
+from ai.annotations.adjudicator import _DEFAULT_INTENT, _iou, adjudicate
+from ai.config import ANNOTATION_AMBIGUITY_THRESHOLD
 from ai.ocr import content_type as content_type_module
 from ai.ocr import vlm_engine
 from ai.ocr.router import run as run_ocr
@@ -206,6 +208,192 @@ def _process_block(block_gray: np.ndarray, block_binary: np.ndarray, vlm) -> dic
     }
 
 
+def _normalise_word(text: str) -> str:
+    return _NORMALISE_RE.sub("", text.lower())
+
+
+# A fraction bar is geometrically IDENTICAL to a real underline (ink
+# above, blank below) to underline.py's own detector, by construction —
+# not a threshold-tuning problem. Live-verified (2026-10-06): Gemini
+# transcribes a handwritten fraction as literal LaTeX (e.g.
+# "\frac{TP}{(TP + FP)}"), which is a clean, deterministic signal that
+# this block's own fraction bars would otherwise score as confident
+# (0.7-0.9) false-positive underlines. "x / (y + z)"-shaped plain-text
+# fractions are covered too, in case a future prompt change stops asking
+# for LaTeX.
+_MATH_NOTATION_RE = re.compile(r"\\frac|\\sum|\\int|[A-Za-z0-9]\s*/\s*\(")
+
+
+def _looks_like_math_notation(raw_text: str) -> bool:
+    return bool(_MATH_NOTATION_RE.search(raw_text))
+
+
+def _word_text_above(words: list, line_bbox) -> str:
+    """The text of whichever OCR'd word(s) sit just above this candidate
+    underline and overlap it horizontally — this candidate's best guess at
+    which word it's under. `words` are Tesseract's own word-level bboxes
+    (ai.ocr.tesseract_engine.extract_words), crop-local, same coordinate
+    space as `line_bbox` (both measured against the same preprocessed
+    crop)."""
+    line_x0, line_x1 = line_bbox.x, line_bbox.x + line_bbox.w
+    above = []
+    for w in words:
+        word_bottom = w.bbox.y + w.bbox.h
+        gap = line_bbox.y - word_bottom
+        if not (0 <= gap <= WORD_ABOVE_LINE_MAX_GAP):
+            continue
+        word_x0, word_x1 = w.bbox.x, w.bbox.x + w.bbox.w
+        overlap = min(line_x1, word_x1) - max(line_x0, word_x0)
+        shorter_span = min(line_x1 - line_x0, word_x1 - word_x0)
+        if shorter_span > 0 and overlap / shorter_span >= WORD_X_OVERLAP_MIN_FRACTION:
+            above.append(w)
+    above.sort(key=lambda w: w.bbox.x)
+    return " ".join(w.text for w in above)
+
+
+def _matches_any_underlined_word(word_text: str, underlined_words: list[str]) -> bool:
+    normalised = _normalise_word(word_text)
+    if not normalised:
+        return False
+    return any(
+        (target := _normalise_word(w)) and (target in normalised or normalised in target)
+        for w in underlined_words
+    )
+
+
+WORD_ABOVE_LINE_MAX_GAP = 20  # px
+WORD_X_OVERLAP_MIN_FRACTION = 0.4
+
+
+def _cv_assist_annotations(
+    crop: np.ndarray, existing: list, underlined_words: list[str], raw_text: str
+) -> list:
+    """Fills the gap between what Gemini's single extraction call actually
+    populates and what it's supposed to: live testing (2026-10-03) showed
+    it reliably edits reconstructed_text correctly (excluding struck words,
+    stitching in margin insertions) while leaving `annotations` empty even
+    when the prompt says to report one for every such edit — the model
+    does the judgment call but skips the separate structured bookkeeping.
+    The result: a correctly-graded answer with nothing drawn on the image.
+
+    This runs ai.annotations.underline.detect directly against this
+    block's own crop, geometry only, no VLM call: Gemini already got the
+    TEXT right, so there's nothing here that risks a wrong grade — only
+    whether a box gets drawn.
+
+    Kept to UNDERLINE only (live-verified 2026-10-04): underline is clean
+    here (ink-above/blank-below is an unambiguous shape), and it's also
+    the one kind VLM-first structurally can't recover on its own — a real
+    underline's near-zero-height bbox is exactly what the model tends to
+    report badly. STRIKE/ARROW/MARGIN stayed noisy enough in the same test
+    (ruled lines mid-paragraph still read as strikes; arrows.py's
+    ink-asymmetry check still fires on ordinary cursive joins) that a
+    wrong box would mislead a teacher more than a missing one would — so
+    those stay VLM-reported only until that noise is addressed separately.
+
+    Two confidence tiers (live-verified 2026-10-05: CV's own recall on a
+    full block missed most of several real underlines a block genuinely
+    had — only the clearest one cleared ANNOTATION_AMBIGUITY_THRESHOLD on
+    its own):
+    - At or above ANNOTATION_AMBIGUITY_THRESHOLD: accepted outright, same
+      as before.
+    - Below that, down to underline.py's own noise floor: accepted ONLY
+      if `underlined_words` (EXTRACTION_PROMPT's new field — Gemini's own
+      plain-text read of which words are underlined, not a pixel guess)
+      names the word sitting just above that candidate line. Gemini is
+      asked to read text here, which it's reliably good at, rather than
+      estimate a coordinate, which it isn't — this corroboration lets a
+      marginal CV candidate through specifically when an independent,
+      different-modality signal agrees a mark belongs roughly there,
+      without just lowering the confidence bar for everyone and
+      reinstating false positives on ordinary ruled paper.
+
+    Returns the FULL replacement annotations list for this block, not just
+    additions — when Gemini DOES report its own underline bbox directly
+    (it sometimes does, separately from underlined_words), its pixel
+    coordinates are frequently visibly offset from the real word even
+    though the model correctly identified that one exists. CV's own
+    geometry comes from Hough line detection directly against the ink, so
+    it doesn't have that imprecision. When both agree a mark is roughly in
+    the same place, CV's box REPLACES Gemini's rather than being dropped
+    by it — the one case where CV is trusted over Gemini's own report,
+    because here CV is demonstrably the more accurate source of geometry,
+    not just a fallback for when Gemini stays silent.
+
+    Before any of that: corrects Gemini's own STRIKE/UNDERLINE kind label
+    when CV's geometry confidently disagrees (live-verified 2026-10-06:
+    one real page came back with 5 genuine underlines, all correctly
+    detected as marks, but mislabeled STRIKE instead of UNDERLINE in
+    Gemini's own JSON — a semantic mix-up, not a geometry one, since the
+    bbox position was fine). underline.py and strikethrough.py are the
+    same measurement pointed at opposite shapes (ink-above-only vs
+    ink-both-sides) — for a position Gemini ALREADY flagged as one of
+    these two kinds, running both against it and trusting whichever
+    measures higher doesn't require reading any text (unlike the
+    underlined_words corroboration above, which needs Tesseract word
+    positions and doesn't work reliably on real handwriting — see that
+    tier's own history). This only ever RELABELS a mark Gemini already
+    reported; it never adds a new STRIKE from nothing, so it doesn't
+    reopen strikethrough.py's own false-positive risk on ordinary ruled
+    paper (why STRIKE was kept out of the rescue tier above).
+
+    Skipped entirely — returns `existing` untouched — when this block's
+    own transcription looks like it contains a fraction/formula (see
+    _looks_like_math_notation): a handwritten fraction bar is ink-above,
+    blank-below over its numerator exactly like a real underline is, so
+    underline.py scores one with genuine, non-marginal confidence
+    (observed live, 2026-10-06: 0.84 and 0.88 on two fraction bars in a
+    precision/recall formula block) — not a case the confidence tiers
+    above can tell apart from a real mark, since geometrically there is
+    no difference to measure.
+    """
+    if _looks_like_math_notation(raw_text):
+        return existing
+    pre = preprocess(crop)
+    underline_candidates = underline.detect(pre.binary)
+    strike_candidates = strikethrough.detect(pre.binary)
+
+    def _best_match(bbox, candidates):
+        matches = [c.confidence for c in candidates if _iou(bbox, c.bbox) >= 0.3]
+        return max(matches, default=0.0)
+
+    corrected_existing = []
+    for e in existing:
+        if e.kind not in ("STRIKE", "UNDERLINE"):
+            corrected_existing.append(e)
+            continue
+        same_candidates = strike_candidates if e.kind == "STRIKE" else underline_candidates
+        other_kind = "UNDERLINE" if e.kind == "STRIKE" else "STRIKE"
+        other_candidates = underline_candidates if e.kind == "STRIKE" else strike_candidates
+        same_conf = _best_match(e.bbox, same_candidates)
+        other_conf = _best_match(e.bbox, other_candidates)
+        if other_conf > same_conf and other_conf >= ANNOTATION_AMBIGUITY_THRESHOLD:
+            # Mutated in place rather than via dataclasses.replace(): `e`
+            # here is the Django model Annotation (apps/evaluation/models.py),
+            # not ai.types.Annotation — a transient carrier never saved
+            # until _save_block persists it, so direct mutation is safe.
+            e.kind = other_kind
+            e.intent = _DEFAULT_INTENT[other_kind]
+            e.resolved_by = "CV"
+        corrected_existing.append(e)
+
+    accepted = [a for a in underline_candidates if a.confidence >= ANNOTATION_AMBIGUITY_THRESHOLD]
+    if underlined_words:
+        marginal = [a for a in underline_candidates if a.confidence < ANNOTATION_AMBIGUITY_THRESHOLD]
+        if marginal:
+            words = extract_words(pre.image)
+            for candidate in marginal:
+                word_text = _word_text_above(words, candidate.bbox)
+                if _matches_any_underlined_word(word_text, underlined_words):
+                    accepted.append(candidate)
+    kept_existing = [
+        e
+        for e in corrected_existing
+        if not (e.kind == "UNDERLINE" and any(_iou(e.bbox, c.bbox) >= 0.3 for c in accepted))
+    ]
+    return kept_existing + accepted
+
+
 def _crop_page_block(image: np.ndarray, block: ExtractedBlock) -> dict:
     """Convert one VLM page-coordinate block into the persistence shape.
 
@@ -237,6 +425,11 @@ def _crop_page_block(image: np.ndarray, block: ExtractedBlock) -> dict:
                 confidence=annotation.confidence,
                 resolved_by="VLM",
             )
+        )
+
+    if block.content_type == "TEXT":
+        annotations = _cv_assist_annotations(
+            crop, annotations, block.underlined_words, block.raw_text
         )
 
     return {
@@ -293,6 +486,58 @@ def _full_page_blocks(image: np.ndarray, blocks: list[ExtractedBlock]) -> dict:
     }
 
 
+def _merge_text_blocks(blocks: list[ExtractedBlock], max_bottom: float) -> ExtractedBlock:
+    """Collapses several same-question TEXT blocks from one page into one.
+
+    Gemini's "one block per answer/question region" instruction
+    (EXTRACTION_PROMPT) isn't always followed — observed live (2026-10-04):
+    one short, continuous handwritten paragraph came back as 6 separate
+    blocks, each only a couple of lines tall, with the same question
+    number. Left as 6 blocks, the review screen renders 6 separate thin
+    image strips stacked on top of each other instead of one answer — "why
+    is my image shredded" is the direct, correct reading of that.
+
+    The crop's LEFT/TOP/RIGHT edges come from the union of these blocks'
+    own bboxes (trustworthy — a block's own top-left corner is where
+    Gemini actually drew it). The BOTTOM edge deliberately does NOT: it
+    uses `max_bottom` (the caller's choice — see _vlm_page_blocks, which
+    passes the next question's own top on this page, or the page's bottom
+    edge if there is none) instead of these blocks' own union height.
+    Live-verified (2026-10-04) that this matters even with NO overlap
+    between blocks: Gemini transcribed a 6-line answer's text completely
+    correctly, but the trailing block's own reported height undershot how
+    much of the page it actually covered — a plain union still came out
+    too short and the saved crop silently stopped partway through the
+    real answer. A second identical extraction call on the same image
+    moments later produced different, correct bboxes for the same text —
+    confirming this is Gemini's own per-call non-determinism, not a
+    one-off, so nothing about an individual block's own claimed height can
+    safely be trusted as this crop's lower bound. Extending to the next
+    independently-known boundary instead costs a slightly taller crop
+    (some blank trailing space is normal) in exchange for never truncating
+    real content — the safer trade given the alternative is silently
+    grading text the teacher can't actually see or verify.
+
+    Annotation bboxes need no adjustment here — they're still in page
+    coordinates at this point (_crop_page_block does the only
+    page->crop conversion, after this).
+    """
+    ordered = sorted(blocks, key=lambda b: b.bbox["y"])
+    x0 = min(b.bbox["x"] for b in ordered)
+    y0 = min(b.bbox["y"] for b in ordered)
+    x1 = max(b.bbox["x"] + b.bbox["w"] for b in ordered)
+    return ExtractedBlock(
+        question_number=ordered[0].question_number,
+        bbox={"x": x0, "y": y0, "w": x1 - x0, "h": max_bottom - y0},
+        content_type="TEXT",
+        raw_text=" ".join(b.raw_text for b in ordered if b.raw_text).strip(),
+        reconstructed_text=" ".join(b.reconstructed_text for b in ordered if b.reconstructed_text).strip(),
+        confidence=sum(b.confidence for b in ordered) / len(ordered),
+        annotations=[a for b in ordered for a in b.annotations],
+        underlined_words=[w for b in ordered for w in b.underlined_words],
+    )
+
+
 def _vlm_geometry_is_suspicious(image: np.ndarray, blocks: list[ExtractedBlock]) -> bool:
     if not blocks:
         return False
@@ -326,12 +571,49 @@ def _vlm_page_blocks(sheet, questions: list, vlm) -> dict:
                 for key, blocks in by_question.items():
                     grouped.setdefault(key, []).append(_full_page_blocks(page_image, blocks))
                 continue
+            # Resolve each block's question key first, in page order, THEN
+            # merge same-question TEXT blocks on this page into one (see
+            # _merge_text_blocks) — merging needs the resolved key to know
+            # which blocks actually belong together, so it can't happen
+            # before carried_number resolution above.
+            page_groups: dict[str, list[ExtractedBlock]] = {}
+            page_order: list[str] = []
             for block in extracted.blocks:
                 question_number = block.question_number or carried_number
                 if block.question_number:
                     carried_number = block.question_number
                 key = _normalise_number(question_number)
-                grouped.setdefault(key, []).append(_crop_page_block(page_image, block))
+                page_groups.setdefault(key, []).append(block)
+                if key not in page_order:
+                    page_order.append(key)
+
+            page_height = page_image.shape[0]
+            for key in page_order:
+                blocks_for_key = page_groups[key]
+                text_blocks = [b for b in blocks_for_key if b.content_type == "TEXT"]
+                to_crop = [b for b in blocks_for_key if b.content_type != "TEXT"]
+                if len(text_blocks) > 1:
+                    # Cap how far down the merged crop can extend at
+                    # wherever the NEXT question's own content starts on
+                    # this page (or the page bottom, if this is the last
+                    # one) — not at the union of these blocks' own
+                    # reported heights. See _merge_text_blocks's docstring
+                    # for why an individual block's own height can't be
+                    # trusted as this crop's lower bound.
+                    own_top = min(b.bbox["y"] for b in text_blocks)
+                    other_tops = [
+                        min(b.bbox["y"] for b in other_blocks)
+                        for other_key, other_blocks in page_groups.items()
+                        if other_key != key
+                    ]
+                    later_tops = [top for top in other_tops if top > own_top]
+                    max_bottom = min(page_height, *later_tops) if later_tops else page_height
+                    to_crop.append(_merge_text_blocks(text_blocks, max_bottom))
+                else:
+                    to_crop.extend(text_blocks)
+                to_crop.sort(key=lambda b: b.bbox["y"])  # original reading order
+                for block in to_crop:
+                    grouped.setdefault(key, []).append(_crop_page_block(page_image, block))
     return grouped
 
 

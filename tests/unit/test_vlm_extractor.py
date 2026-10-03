@@ -39,6 +39,40 @@ def test_vlm_extractor_validates_structured_page_response():
     assert result.blocks[0].annotations[0].kind == "STRIKE"
 
 
+def test_vlm_extractor_parses_underlined_words_and_defaults_to_empty():
+    response = {
+        "blocks": [
+            {
+                "question_number": "1a",
+                "bbox": {"x": 0, "y": 0, "w": 300, "h": 200},
+                "content_type": "TEXT",
+                "raw_text": "encapsulation and abstraction",
+                "reconstructed_text": "encapsulation and abstraction",
+                "confidence": 0.9,
+                "annotations": [],
+                "underlined_words": ["encapsulation", " abstraction ", "", "  "],
+            },
+            {
+                "question_number": "1b",
+                "bbox": {"x": 0, "y": 200, "w": 300, "h": 100},
+                "content_type": "TEXT",
+                "raw_text": "no marks here",
+                "reconstructed_text": "no marks here",
+                "confidence": 0.9,
+                "annotations": [],
+                # underlined_words omitted entirely — must not fail parsing.
+            },
+        ]
+    }
+    image = np.full((400, 600, 3), 255, dtype=np.uint8)
+
+    result = extract_page(image, MockVLMProvider(response=json.dumps(response)))
+
+    # Blank/whitespace-only entries dropped, real ones trimmed.
+    assert result.blocks[0].underlined_words == ["encapsulation", "abstraction"]
+    assert result.blocks[1].underlined_words == []
+
+
 def test_vlm_extractor_clamps_out_of_bounds_coordinates():
     # A real Gemini response on a real photographed answer sheet (2026-09-29
     # live test) reported a bbox a few px past the page edge on one page and
@@ -152,6 +186,46 @@ def test_vlm_extractor_drops_a_malformed_annotation_but_keeps_the_block():
     assert len(result.blocks) == 1
     assert result.blocks[0].reconstructed_text == "the answer"
     assert result.blocks[0].annotations == []
+
+
+def test_vlm_extractor_keeps_a_genuine_thin_underline_instead_of_dropping_it():
+    # Live finding (2026-10-03): a real underline is a thin LINE, not a
+    # filled box — Gemini's own pixel estimate for one routinely reports
+    # h=0 or h=1, which used to be rejected as "malformed" by the same
+    # positive-width/height check a truly degenerate box needs, silently
+    # losing every real underline the model correctly found. Unlike the
+    # degenerate case above (box pinned to the exact image edge, zero room
+    # to recover), this bbox sits well inside the page with room to grow,
+    # so it should survive with a floored height instead of being dropped.
+    response = {
+        "blocks": [
+            {
+                "question_number": "1",
+                "bbox": {"x": 0, "y": 0, "w": 600, "h": 400},
+                "content_type": "TEXT",
+                "raw_text": "the important word",
+                "reconstructed_text": "the important word",
+                "confidence": 0.9,
+                "annotations": [
+                    {
+                        "kind": "UNDERLINE",
+                        "intent": "EMPHASIS",
+                        "bbox": {"x": 120, "y": 200, "w": 80, "h": 0},
+                        "confidence": 0.88,
+                    }
+                ],
+            }
+        ]
+    }
+    image = np.full((400, 600, 3), 255, dtype=np.uint8)
+
+    result = extract_page(image, MockVLMProvider(response=json.dumps(response)))
+
+    assert len(result.blocks[0].annotations) == 1
+    kept = result.blocks[0].annotations[0]
+    assert kept.kind == "UNDERLINE"
+    assert kept.bbox["h"] > 0
+    assert kept.bbox["w"] == 80
 
 
 def test_vlm_extractor_accepts_width_height_as_bbox_key_aliases():

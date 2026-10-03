@@ -161,23 +161,54 @@ RULED_LINE_POSITION_TOLERANCE = 2
 RULED_LINE_MIN_WIDTH_FRACTION = 0.75
 RULED_PATTERN_MIN_COUNT = 3
 
+# The count-based check above was validated against a whole-PAGE binary,
+# where real notebook ruling repeats often enough to clear
+# RULED_PATTERN_MIN_COUNT easily. Called per answer-BLOCK crop instead (a
+# tight region around one answer, not the whole page), that count is
+# almost never reached — a block typically only contains the one or two
+# ruled lines nearest its own top/bottom edge, not several — so this
+# suppression silently never activated in that context (confirmed live,
+# 2026-10-03: ruled lines bounding single-answer crops were accepted as
+# genuine high-confidence STRIKE/UNDERLINE marks, and strikethrough.py's
+# masking then erased real adjacent handwriting before OCR ever read it).
+# A SINGLE full-width line sitting right at a block's own top or bottom
+# edge is still almost always that block's ruled boundary, never a
+# genuine mark — a student's strike/underline is drawn somewhere over
+# their own writing, not pinned to the exact crop edge. This doesn't need
+# a count at all, just position.
+RULED_LINE_EDGE_MARGIN_FRACTION = 0.08
 
-def ruled_paper_line_ys(lines: list[Line], block_width: int) -> set[int]:
-    """Returns the (rounded) `mid_y` of every near-horizontal line spanning
-    most of the block's width, once there are enough of them in one block
-    to look like printed ruling rather than one or two genuine marks — so
-    a caller (underline.py, strikethrough.py) can treat a candidate
-    landing on one of these rows as suspect rather than a confident
-    CV-resolved mark. See this function's module-level comment for why
-    that's "count", not "count AND regular pitch"."""
+
+def ruled_paper_line_ys(
+    lines: list[Line], block_width: int, block_height: int | None = None
+) -> set[int]:
+    """Returns the (rounded) `mid_y` of every near-horizontal line that
+    looks like printed ruling rather than a genuine hand-drawn mark — so a
+    caller (underline.py, strikethrough.py) can treat a candidate landing
+    on one of these rows as suspect rather than a confident CV-resolved
+    mark. Two independent signals, either one enough on its own:
+    several full-width lines in the same image (original "count" signal,
+    see the module-level comment above), or ANY full-width line sitting
+    right at the image's own top/bottom edge (RULED_LINE_EDGE_MARGIN_FRACTION
+    above) — only checked when the caller passes `block_height`, so a
+    whole-page caller that never cared about this stays unaffected."""
     full_width = [
         ln
         for ln in lines
         if near_horizontal(ln) and ln.length >= block_width * RULED_LINE_MIN_WIDTH_FRACTION
     ]
-    if len(full_width) < RULED_PATTERN_MIN_COUNT:
-        return set()
-    return {int(ln.mid_y) for ln in full_width}
+    if len(full_width) >= RULED_PATTERN_MIN_COUNT:
+        return {int(ln.mid_y) for ln in full_width}
+    if block_height:
+        margin = block_height * RULED_LINE_EDGE_MARGIN_FRACTION
+        edge_pinned = {
+            int(ln.mid_y)
+            for ln in full_width
+            if ln.mid_y <= margin or ln.mid_y >= block_height - margin
+        }
+        if edge_pinned:
+            return edge_pinned
+    return set()
 
 
 def ruled_paper_line_xs(lines: list[Line], block_height: int) -> set[int]:

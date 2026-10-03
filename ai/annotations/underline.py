@@ -52,7 +52,7 @@ def detect(binary) -> list[Annotation]:
     """See strikethrough.py's detect() docstring — same local-extent
     length comparison, same reasoning."""
     lines = merge_collinear([ln for ln in detect_lines(binary) if near_horizontal(ln)])
-    ruled_ys = ruled_paper_line_ys(lines, binary.shape[1])
+    ruled_ys = ruled_paper_line_ys(lines, binary.shape[1], binary.shape[0])
     annotations = []
     for line in lines:
         local_width = local_ink_extent(binary, int(line.mid_y), int(line.mid_x))
